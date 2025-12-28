@@ -1,397 +1,280 @@
-import { useEffect, useMemo, useState } from "react";
+// pages/api/chat.js
+import crypto from "crypto";
 
-export default function HomePage() {
-  const [templates, setTemplates] = useState([]);
-  const [selectedTemplateId, setSelectedTemplateId] = useState("");
-  const [token, setToken] = useState(null);
-  const [messages, setMessages] = useState([]);
-  const [input, setInput] = useState("");
-  const [phase, setPhase] = useState("loading"); // loading | choose | chat
-  const [error, setError] = useState("");
+/**
+ * REQUIRED ENV:
+ * - OPENAI_API_KEY
+ * - EXPERIMENT_SECRET
+ */
 
-  const canStart = useMemo(() => !!selectedTemplateId && !token, [selectedTemplateId, token]);
-  const canSend = useMemo(() => !!token && input.trim().length > 0, [token, input]);
+/* -------------------- 1) Standardized Templates -------------------- */
 
-  // A) Load templates on mount
-  useEffect(() => {
-    (async () => {
-      setError("");
-      setPhase("loading");
-      try {
-        const res = await fetch("/api/chat", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ type: "templates" }),
-        });
+const TEMPLATES = [
+  {
+    id: "T1",
+    title: "Akademik Performans Baskısı",
+    text: "Son zamanlarda ders/tez/iş yetiştirme baskısı yüzünden sürekli gerginim. Ne kadar çalışsam da yetmiyor gibi hissediyorum. Erteledikçe suçluluk artıyor ve kısır döngüye giriyorum.",
+    area: "academics",
+  },
+  {
+    id: "T2",
+    title: "İlişkide Belirsizlik ve Kaygı",
+    text: "İlişkimde son dönemde iletişim bozuldu. Ne hissettiğimden emin değilim ama kaygım yükseliyor. Bir şey söyleyince yanlış anlaşılmaktan, söylemeyince de birikmesinden korkuyorum.",
+    area: "relationship",
+  },
+  {
+    id: "T3",
+    title: "Aile Baskısı ve Sınırlar",
+    text: "Ailem benden sürekli bir şey bekliyor ve hayır demekte zorlanıyorum. Kendimi suçlu hissediyorum ama aynı zamanda bunalmış durumdayım. Sınır koymak istiyorum.",
+    area: "family",
+  },
+  {
+    id: "T4",
+    title: "Sosyal Kaygı ve Değerlendirilme Korkusu",
+    text: "İnsanlarla bir araya gelince çok geriliyorum. Yanlış bir şey söyleyeceğim ya da garip görüneceğim diye düşünüyorum. Sonra günlerce kafamda tekrar ediyorum.",
+    area: "social_anxiety",
+  },
+  {
+    id: "T5",
+    title: "Özgüven / Kendini Yetersiz Hissetme",
+    text: "Kendimi sürekli yetersiz hissediyorum. Başkaları daha başarılı, daha güzel/iyi gibi geliyor. Kendimi eleştirmekten duramıyorum.",
+    area: "self_esteem",
+  },
+  {
+    id: "T6",
+    title: "Tükenmişlik ve Motivasyon Kaybı",
+    text: "Uzun süredir yorgun hissediyorum. Gün içinde enerjim yok, her şey üstüme geliyor. Dinlensem bile toparlanamıyorum.",
+    area: "burnout",
+  },
+  {
+    id: "T7",
+    title: "Kayıp / Yas / Ayrılık",
+    text: "Yakın zamanda bir kayıp yaşadım (ayrılık/vefat/bitmiş bir dönem). Aklıma geldikçe içim sıkışıyor. Bazen güçlü duruyorum bazen de dağılıyorum.",
+    area: "grief",
+  },
+  {
+    id: "T8",
+    title: "Sağlık Kaygısı / Bedensel Belirtiler",
+    text: "Bedensel belirtilerim olduğunda (ağrı, çarpıntı vb.) çok kaygılanıyorum. ‘Ya ciddi bir şeyse’ diye düşünüp internete bakıyorum ve daha da kötüleşiyorum.",
+    area: "health_anxiety",
+  },
+  {
+    id: "T9",
+    title: "Yalnızlık ve Destek Eksikliği",
+    text: "Kendimi yalnız hissediyorum. İnsanlarla çevriliyim ama gerçekten anlaşılmıyorum gibi. Bazen konuşacak kimse bulamıyorum.",
+    area: "loneliness",
+  },
+  {
+    id: "T10",
+    title: "Öfke, Tahammülsüzlük ve Patlama",
+    text: "Son zamanlarda küçük şeylere bile çok sinirleniyorum. Sonra pişman oluyorum. Sanki içimde birikmiş bir yük var.",
+    area: "anger",
+  },
+];
 
-        const data = await res.json().catch(() => ({}));
-        if (!res.ok) throw new Error(data?.error || "Template yükleme hatası");
+/* -------------------- 2) Uniform Sentence Completion Starter -------------------- */
 
-        setTemplates(Array.isArray(data.templates) ? data.templates : []);
-        setPhase("choose");
-      } catch (e) {
-        setError(e?.message || "Bilinmeyen hata");
-        setPhase("choose");
-      }
-    })();
-  }, []);
+const SENTENCE_COMPLETION_FORM = `
+Lütfen aşağıdaki cümleleri kısa şekilde tamamla (tek tek yazabilirsin):
 
-  // Helper: safe session id
-  function newSessionId() {
-    try {
-      return crypto.randomUUID();
-    } catch {
-      return String(Date.now());
-    }
-  }
+1) Bu durum beni en çok ______ hissettirdi.
+2) O sırada aklımdan geçen en baskın düşünce ______ idi.
+3) Beni en çok zorlayan şey ______.
+4) Şu anda bu konudan beklentim / ihtiyacım ______.
+5) Daha önce denediğim şey ______ ve sonucu ______ oldu.
+`.trim();
 
-  // B) Start chat: assigns condition on server, returns token + starter reply
-  async function handleStart() {
-    setError("");
-    if (!selectedTemplateId) {
-      setError("Lütfen bir metin seç.");
-      return;
-    }
-
-    try {
-      const res = await fetch("/api/chat", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          type: "start",
-          sessionId: newSessionId(),
-          templateId: selectedTemplateId,
-        }),
-      });
-
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data?.error || "Start isteği başarısız");
-
-      if (!data.token || !data.reply) throw new Error("Start yanıtı eksik (token/reply).");
-
-      setToken(data.token);
-      setMessages([{ role: "assistant", content: data.reply }]);
-      setPhase("chat");
-      setInput("");
-    } catch (e) {
-      setError(e?.message || "Bilinmeyen hata");
-    }
-  }
-
-  // C) Send a turn
-  async function handleSend() {
-    setError("");
-    if (!token) {
-      setError("Önce sohbeti başlatmalısın.");
-      return;
-    }
-    const text = input.trim();
-    if (!text) return;
-
-    const nextMessages = [...messages, { role: "user", content: text }];
-    setMessages(nextMessages);
-    setInput("");
-
-    try {
-      const res = await fetch("/api/chat", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          type: "turn",
-          token,
-          messages: nextMessages,
-        }),
-      });
-
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data?.error || "Turn isteği başarısız");
-
-      if (!data.reply) throw new Error("Model yanıtı boş döndü.");
-
-      setMessages([...nextMessages, { role: "assistant", content: data.reply }]);
-    } catch (e) {
-      setError(e?.message || "Bilinmeyen hata");
-    }
-  }
-
-  // Reset (optional)
-  function handleReset() {
-    setError("");
-    setToken(null);
-    setMessages([]);
-    setInput("");
-    setPhase("choose");
-  }
-
+function getStarterUniform() {
   return (
-    <div style={styles.page}>
-      <div style={styles.container}>
-        <header style={styles.header}>
-          <h1 style={styles.h1}>Deney Arayüzü</h1>
-          <p style={styles.p}>
-            1) Metin seç → 2) Sohbeti başlat → 3) Mesaj yaz. Koşul (empatik/bilgilendirici) sistem tarafından otomatik atanır.
-          </p>
-        </header>
-
-        {error ? <div style={styles.errorBox}>{error}</div> : null}
-
-        {phase !== "chat" ? (
-          <section style={styles.card}>
-            <h2 style={styles.h2}>1) Bir metin seç</h2>
-
-            {phase === "loading" ? (
-              <div style={styles.muted}>Yükleniyor...</div>
-            ) : (
-              <div style={styles.templateList}>
-                {templates.map((t) => (
-                  <label key={t.id} style={styles.templateItem}>
-                    <input
-                      type="radio"
-                      name="template"
-                      value={t.id}
-                      checked={selectedTemplateId === t.id}
-                      onChange={() => setSelectedTemplateId(t.id)}
-                      style={styles.radio}
-                    />
-                    <div>
-                      <div style={styles.templateTitle}>{t.title}</div>
-                      <div style={styles.templateText}>{t.text}</div>
-                    </div>
-                  </label>
-                ))}
-              </div>
-            )}
-
-            <div style={styles.actions}>
-              <button onClick={handleStart} disabled={!canStart} style={buttonStyle(canStart)}>
-                2) Sohbeti Başlat
-              </button>
-            </div>
-
-            <div style={styles.note}>
-              Not: Eğer “Bad request: unknown type” görürsen, frontend eski istek tiplerini gönderiyor demektir.
-              Bu sayfa sadece templates/start/turn kullanır.
-            </div>
-          </section>
-        ) : (
-          <section style={styles.card}>
-            <div style={styles.chatHeader}>
-              <h2 style={styles.h2}>3) Sohbet</h2>
-              <button onClick={handleReset} style={styles.resetBtn}>
-                Yeni katılımcı / sıfırla
-              </button>
-            </div>
-
-            <div style={styles.chatBox}>
-              {messages.map((m, i) => (
-                <div key={i} style={m.role === "user" ? styles.bubbleUser : styles.bubbleBot}>
-                  <div style={styles.bubbleRole}>{m.role === "user" ? "Sen" : "Bot"}</div>
-                  <div style={styles.bubbleText}>{m.content}</div>
-                </div>
-              ))}
-            </div>
-
-            <div style={styles.inputRow}>
-              <input
-                value={input}
-                onChange={(e) => setInput(e.target.value)}
-                placeholder="Mesajını yaz"
-                style={styles.input}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" && !e.shiftKey) {
-                    e.preventDefault();
-                    if (canSend) handleSend();
-                  }
-                }}
-              />
-              <button onClick={handleSend} disabled={!canSend} style={buttonStyle(canSend)}>
-                Gönder
-              </button>
-            </div>
-
-            <div style={styles.noteSmall}>
-              Enter: gönder. Shift+Enter: yeni satır.
-            </div>
-          </section>
-        )}
-
-        <footer style={styles.footer}>
-          <div style={styles.mutedSmall}>
-            Backend endpoint: <code>/api/chat</code> (types: templates, start, turn)
-          </div>
-        </footer>
-      </div>
-    </div>
+    "Kısa bir sohbet yapacağız. Daha iyi anlayabilmem için lütfen aşağıdaki cümleleri tamamla.\n\n" +
+    SENTENCE_COMPLETION_FORM
   );
 }
 
-function buttonStyle(enabled) {
-  return {
-    padding: "10px 14px",
-    borderRadius: 10,
-    border: "1px solid #111",
-    background: enabled ? "#111" : "#777",
-    color: "#fff",
-    cursor: enabled ? "pointer" : "not-allowed",
-    fontWeight: 600,
-  };
+/* -------------------- 3) System Prompts (manipulation only here) -------------------- */
+
+function getSystemPrompt(condition) {
+  if (condition === "empathic") {
+    return [
+      "You are a short-term emotional support chatbot (not a therapist).",
+      "Respond in Turkish.",
+      "Style: empathic, warm, validating, non-clinical.",
+      "Do: reflect feelings, normalize, show understanding, gentle tone, ask ONE soft follow-up question.",
+      "Do NOT: diagnose, claim clinical authority, say you are a therapist, or provide medical/legal advice.",
+      "Length: 90-140 words.",
+    ].join(" ");
+  }
+  return [
+    "You are a short-term practical support chatbot (not a therapist).",
+    "Respond in Turkish.",
+    "Style: informational, structured, solution-focused, non-clinical.",
+    "Do: summarize the issue briefly, ask 1 clarifying question, give 2-3 actionable steps.",
+    "Do NOT: diagnose, moralize, claim clinical authority, or provide medical/legal advice.",
+    "Length: 90-140 words.",
+  ].join(" ");
 }
 
-const styles = {
-  page: {
-    minHeight: "100vh",
-    background: "#f6f6f6",
-    padding: 24,
-    boxSizing: "border-box",
-    fontFamily: "system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif",
-  },
-  container: {
-    maxWidth: 900,
-    margin: "0 auto",
-  },
-  header: {
-    marginBottom: 16,
-  },
-  h1: {
-    margin: 0,
-    fontSize: 28,
-    lineHeight: 1.2,
-  },
-  h2: {
-    margin: "0 0 12px 0",
-    fontSize: 18,
-  },
-  p: {
-    margin: "8px 0 0 0",
-    color: "#444",
-  },
-  card: {
-    background: "#fff",
-    border: "1px solid #ddd",
-    borderRadius: 14,
-    padding: 16,
-    boxShadow: "0 1px 3px rgba(0,0,0,0.06)",
-  },
-  errorBox: {
-    background: "#ffe5e5",
-    border: "1px solid #ffb3b3",
-    padding: 12,
-    borderRadius: 12,
-    marginBottom: 12,
-    color: "#7a0000",
-  },
-  templateList: {
-    display: "grid",
-    gap: 10,
-  },
-  templateItem: {
-    display: "flex",
-    gap: 10,
-    alignItems: "flex-start",
-    border: "1px solid #e6e6e6",
-    borderRadius: 12,
-    padding: 12,
-    cursor: "pointer",
-  },
-  radio: { marginTop: 4 },
-  templateTitle: {
-    fontWeight: 700,
-    marginBottom: 4,
-  },
-  templateText: {
-    color: "#444",
-    lineHeight: 1.35,
-  },
-  actions: {
-    marginTop: 12,
-    display: "flex",
-    gap: 10,
-  },
-  note: {
-    marginTop: 12,
-    color: "#666",
-    fontSize: 12,
-    lineHeight: 1.4,
-  },
-  noteSmall: {
-    marginTop: 10,
-    color: "#666",
-    fontSize: 12,
-  },
-  muted: {
-    color: "#666",
-  },
-  mutedSmall: {
-    color: "#666",
-    fontSize: 12,
-  },
-  chatHeader: {
-    display: "flex",
-    justifyContent: "space-between",
-    alignItems: "center",
-    gap: 10,
-    marginBottom: 10,
-  },
-  resetBtn: {
-    padding: "8px 10px",
-    borderRadius: 10,
-    border: "1px solid #bbb",
-    background: "#fff",
-    cursor: "pointer",
-  },
-  chatBox: {
-    height: 360,
-    overflowY: "auto",
-    border: "1px solid #e6e6e6",
-    borderRadius: 12,
-    padding: 12,
-    background: "#fafafa",
-    display: "flex",
-    flexDirection: "column",
-    gap: 10,
-  },
-  bubbleUser: {
-    alignSelf: "flex-end",
-    maxWidth: "78%",
-    background: "#111",
-    color: "#fff",
-    borderRadius: 14,
-    padding: "10px 12px",
-  },
-  bubbleBot: {
-    alignSelf: "flex-start",
-    maxWidth: "78%",
-    background: "#fff",
-    color: "#111",
-    borderRadius: 14,
-    padding: "10px 12px",
-    border: "1px solid #e6e6e6",
-  },
-  bubbleRole: {
-    fontSize: 12,
-    opacity: 0.8,
-    marginBottom: 6,
-    fontWeight: 700,
-  },
-  bubbleText: {
-    whiteSpace: "pre-wrap",
-    lineHeight: 1.35,
-  },
-  inputRow: {
-    display: "flex",
-    gap: 10,
-    marginTop: 12,
-  },
-  input: {
-    flex: 1,
-    padding: 12,
-    borderRadius: 10,
-    border: "1px solid #ccc",
-    outline: "none",
-    fontSize: 14,
-  },
-  footer: {
-    marginTop: 14,
-    textAlign: "center",
-  },
-};
+/* -------------------- 4) Token helpers (HMAC signed) -------------------- */
+
+function base64url(input) {
+  return Buffer.from(input)
+    .toString("base64")
+    .replace(/=/g, "")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_");
+}
+
+function unbase64url(input) {
+  const pad = input.length % 4 === 0 ? "" : "=".repeat(4 - (input.length % 4));
+  const s = (input + pad).replace(/-/g, "+").replace(/_/g, "/");
+  return Buffer.from(s, "base64").toString("utf8");
+}
+
+function signToken(payloadObj, secret) {
+  const payload = base64url(JSON.stringify(payloadObj));
+  const sig = crypto.createHmac("sha256", secret).update(payload).digest("base64");
+  const sigUrl = sig.replace(/=/g, "").replace(/\+/g, "-").replace(/\//g, "_");
+  return `${payload}.${sigUrl}`;
+}
+
+function verifyToken(token, secret) {
+  if (!token || typeof token !== "string" || !token.includes(".")) return null;
+  const [payload, sig] = token.split(".");
+  const expected = crypto
+    .createHmac("sha256", secret)
+    .update(payload)
+    .digest("base64")
+    .replace(/=/g, "")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_");
+
+  if (sig !== expected) return null;
+  try {
+    return JSON.parse(unbase64url(payload));
+  } catch {
+    return null;
+  }
+}
+
+/* -------------------- 5) Handler -------------------- */
+
+export default async function handler(req, res) {
+  if (req.method !== "POST") {
+    return res.status(405).json({ error: "Method not allowed" });
+  }
+
+  try {
+    const { type } = req.body || {};
+
+    if (!process.env.OPENAI_API_KEY) {
+      return res.status(500).json({ error: "Missing OPENAI_API_KEY (Vercel env)" });
+    }
+    if (!process.env.EXPERIMENT_SECRET) {
+      return res.status(500).json({ error: "Missing EXPERIMENT_SECRET (Vercel env)" });
+    }
+
+    // A) Return templates
+    if (type === "templates") {
+      return res.status(200).json({
+        templates: TEMPLATES.map(({ id, title, text }) => ({ id, title, text })),
+      });
+    }
+
+    // B) Start: assign condition server-side, return token + uniform starter
+    if (type === "start") {
+      const { sessionId, templateId } = req.body || {};
+      const t = TEMPLATES.find((x) => x.id === templateId);
+      if (!t) return res.status(400).json({ error: "Bad request: invalid templateId" });
+
+      const condition = Math.random() < 0.5 ? "empathic" : "informational";
+      const starter = getStarterUniform();
+
+      const payload = {
+        v: 1,
+        sessionId: String(sessionId || ""),
+        templateId,
+        condition,
+        iat: Date.now(),
+      };
+      const token = signToken(payload, process.env.EXPERIMENT_SECRET);
+
+      return res.status(200).json({
+        token,
+        condition, // UI'da göstermene gerek yok; log/analiz için döndürüyorum
+        template: { id: t.id, title: t.title, text: t.text },
+        reply: starter,
+      });
+    }
+
+    // C) Turn: token determines condition/template (client cannot manipulate)
+    if (type === "turn") {
+      const { token, messages } = req.body || {};
+      if (!Array.isArray(messages)) {
+        return res.status(400).json({ error: "Bad request: messages" });
+      }
+
+      const payload = verifyToken(token, process.env.EXPERIMENT_SECRET);
+      if (!payload?.templateId || !payload?.condition) {
+        return res.status(401).json({ error: "Invalid or missing token" });
+      }
+
+      const t = TEMPLATES.find((x) => x.id === payload.templateId);
+      if (!t) return res.status(400).json({ error: "Template not found" });
+
+      const systemPrompt = getSystemPrompt(payload.condition);
+
+      const templateContext = [
+        "CONTEXT (selected scenario):",
+        `Title: ${t.title}`,
+        `Scenario: ${t.text}`,
+        "Instruction: Keep your response aligned with the selected scenario. Do not switch topics. Stay within the required style.",
+      ].join("\n");
+
+      const modelMessages = [
+        { role: "system", content: systemPrompt + "\n\n" + templateContext },
+        ...messages
+          .filter(
+            (m) =>
+              m &&
+              (m.role === "user" || m.role === "assistant") &&
+              typeof m.content === "string"
+          )
+          .map((m) => ({ role: m.role, content: m.content })),
+      ];
+
+      const r = await fetch("https://api.openai.com/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          model: "gpt-4o-mini",
+          messages: modelMessages,
+          temperature: 0.6,
+        }),
+      });
+
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        const msg = data?.error?.message || data?.message || "OpenAI API error";
+        return res.status(500).json({ error: msg, details: data });
+      }
+
+      const reply = data?.choices?.[0]?.message?.content;
+      if (!reply) {
+        return res.status(500).json({ error: "No reply from OpenAI", details: data });
+      }
+
+      return res.status(200).json({ reply });
+    }
+
+    // Unknown type
+    return res.status(400).json({
+      error: "Bad request: unknown type",
+      allowed_types: ["templates", "start", "turn"],
+    });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Server error" });
+  }
+}
