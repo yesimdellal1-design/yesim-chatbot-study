@@ -1,79 +1,91 @@
 // pages/api/chat.js
-
 export default async function handler(req, res) {
-  if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
+  if (req.method !== "POST") {
+    return res.status(405).json({ error: "Method not allowed" });
+  }
 
   try {
-    const { type, sessionId, condition, template, messages } = req.body || {};
+    const body = req.body || {};
+    const type = body.type; // "init" | "turn"
+    const condition = body.condition || "informational"; // "informational" | "empathic"
+    const template = body.template || {};
+    const messages = Array.isArray(body.messages) ? body.messages : [];
 
-    if (!process.env.OPENAI_API_KEY) {
-      return res.status(500).json({ error: "Missing OPENAI_API_KEY (Vercel env)" });
+    // Basit doğrulama
+    if (type !== "init" && type !== "turn") {
+      return res.status(400).json({ error: "Invalid type" });
     }
 
-    // Basit system prompt (condition'a göre)
-    const systemPrompt =
-      condition === "empathic"
-        ? "You are an empathic, supportive chatbot. Keep responses short, warm, and non-clinical. Do not claim to be a therapist."
-        : "You are an informational, practical chatbot. Ask clarifying questions and offer actionable steps. Do not claim to be a therapist.";
+    // Template’den kısa özet üret
+    const t = {
+      area: (template.area || "").trim(),
+      emotion: (template.emotion || "").trim(),
+      thought: (template.thought || "").trim(),
+      hardMoment: (template.hardMoment || "").trim(),
+      tried: (template.tried || "").trim(),
+    };
 
-    // init'te kullanıcı mesajı yokken de bir başlangıç mesajı üret
+    const templateSummary = [
+      t.area ? `Alan: ${t.area}` : null,
+      t.emotion ? `Duygu: ${t.emotion}` : null,
+      t.thought ? `Düşünce: ${t.thought}` : null,
+      t.hardMoment ? `Zor an: ${t.hardMoment}` : null,
+      t.tried ? `Denediğin: ${t.tried}` : null,
+    ]
+      .filter(Boolean)
+      .join(" | ");
+
+    // INIT: ilk bot mesajı
     if (type === "init") {
-      const starter =
+      const reply =
         condition === "empathic"
-          ? "Merhaba. Burada kısa bir sohbet yapacağız. İstersen şu an seni en çok zorlayan şeyi 1-2 cümleyle yaz."
-          : "Merhaba. İstersen hangi konuda destek istediğini 1-2 cümleyle yaz, birkaç soru sorup daha netleştireyim.";
+          ? `Merhaba. Burada kısa bir sohbet yapacağız. İstersen şu an seni en çok zorlayan şeyi 1-2 cümleyle yaz.\n${
+              templateSummary ? `\n(Şablon özeti: ${templateSummary})` : ""
+            }`
+          : `Merhaba. Kısa bir araştırma sohbeti yapacağız. Lütfen şu an seni zorlayan durumu 1-2 cümleyle tanımla.\n${
+              templateSummary ? `\n(Şablon özeti: ${templateSummary})` : ""
+            }`;
 
-      return res.status(200).json({ reply: starter });
+      return res.status(200).json({ reply });
     }
 
-    // turn ise messages zorunlu
-    if (type !== "turn" || !Array.isArray(messages)) {
-      return res.status(400).json({ error: "Bad request: type/messages" });
+    // TURN: son kullanıcı mesajını bul
+    const lastUser = [...messages].reverse().find((m) => m && m.role === "user" && String(m.content || "").trim());
+    const userText = String(lastUser?.content || "").trim();
+
+    if (!userText) {
+      return res.status(400).json({ error: "Message is required" });
     }
 
-    const templateText = template
-      ? `Context (template):
-- area: ${template.area || ""}
-- emotion: ${template.emotion || ""}
-- thought: ${template.thought || ""}
-- hardMoment: ${template.hardMoment || ""}
-- tried: ${template.tried || ""}`
-      : "";
-
-    const modelMessages = [
-      { role: "system", content: systemPrompt + (templateText ? "\n\n" + templateText : "") },
-      // UI'dan gelen konuşma
-      ...messages
-        .filter((m) => m && (m.role === "user" || m.role === "assistant") && typeof m.content === "string")
-        .map((m) => ({ role: m.role, content: m.content })),
-    ];
-
-    const r = await fetch("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        model: "gpt-4o-mini",
-        messages: modelMessages,
-        temperature: 0.7,
-      }),
-    });
-
-    const data = await r.json().catch(() => ({}));
-
-    if (!r.ok) {
-      // Vercel Runtime Logs'ta net görünsün diye error'u aynen geçiriyoruz
-      const msg = data?.error?.message || data?.message || "OpenAI API error";
-      return res.status(500).json({ error: msg, details: data });
-    }
-
-    const reply = data?.choices?.[0]?.message?.content;
-    if (!reply) return res.status(500).json({ error: "No reply from OpenAI", details: data });
+    // Çok basit mock yanıt mantığı (condition’a göre ton değişiyor)
+    const reply = makeMockReply({ condition, userText, template: t });
 
     return res.status(200).json({ reply });
   } catch (e) {
-    return res.status(500).json({ error: e?.message || "Server error" });
+    return res.status(500).json({ error: "Server error", detail: e?.message });
   }
+}
+
+function makeMockReply({ condition, userText, template }) {
+  const hasEmotion = !!template.emotion;
+  const hasThought = !!template.thought;
+
+  // Empatik kondisyon: duygu yansıtma + açık uçlu soru
+  if (condition === "empathic") {
+    const a = [];
+    a.push("Anladım. Bu konu senin için zorlayıcı geliyor.");
+    if (hasEmotion) a.push(`Şablonda “${template.emotion}” duygusundan bahsetmişsin, bu duyguyu biraz açmak ister misin.`);
+    a.push("Şu an bu durum en çok hangi anda tetikleniyor.");
+    a.push("İstersen bir örnek anı kısaca anlat, ben de oradan birlikte netleştireyim.");
+    return a.join(" ");
+  }
+
+  // Bilgilendirici kondisyon: yapılandırma + netleştirici soru
+  const b = [];
+  b.push("Teşekkürler, not aldım.");
+  b.push("Bunu daha net anlamak için iki şey soracağım.");
+  if (hasThought) b.push(`Aklından geçen ana düşünce şuna benziyor mu: “${template.thought}”.`);
+  b.push("1) Bu durum en son ne zaman oldu ve ne oldu.");
+  b.push("2) Sonuçta ne olmasından korkuyorsun.");
+  return b.join(" ");
 }
