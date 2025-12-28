@@ -84,7 +84,6 @@ export default function Home() {
         setMessages([{ role: "assistant", content: reply }]);
       } catch (err) {
         setErrorText(err?.message || "Başlatma hatası");
-        // chat yine de açılsın, kullanıcı yazınca tekrar deneyeceğiz
       } finally {
         setIsLoading(false);
       }
@@ -97,25 +96,33 @@ export default function Home() {
   }
 
   function startChat() {
-    // minimum kontrol: boş bırakmışsa da ilerlesin (istersen burada zorunlu yaparız)
     setPhase("chat");
   }
 
   async function handleSend() {
-    if (!userInput.trim()) return;
-    if (isLoading) return;
+    const text = userInput.trim();
 
-    // 5 tur dolduysa göndermeyi kapat
+    // ✅ boş mesajı tamamen engelle
+    if (!text) {
+      setErrorText("Message is required");
+      return;
+    }
+
+    if (isLoading) return;
     if (turnsUsed >= TURN_LIMIT) return;
 
-    const userMsg = { role: "user", content: userInput.trim() };
+    setErrorText("");
+
+    // kullanıcı mesajını ekle
+    const userMsg = { role: "user", content: text };
     const nextMessages = [...messages, userMsg];
+
     setMessages(nextMessages);
     setUserInput("");
     setIsLoading(true);
-    setErrorText("");
 
     try {
+      // ✅ API’ye giden messages içinde son mesajın user olduğundan emin ol
       const reply = await callChatAPI({
         type: "turn",
         sessionId,
@@ -128,7 +135,6 @@ export default function Home() {
       const after = [...nextMessages, assistantMsg];
       setMessages(after);
 
-      // kullanıcı turu 5 olduysa otomatik post'a geç
       const nextTurns = after.filter((m) => m.role === "user").length;
       if (nextTurns >= TURN_LIMIT) {
         setPhase("post");
@@ -149,7 +155,7 @@ export default function Home() {
     setMessages([]);
     setUserInput("");
     setErrorText("");
-    // yeni session + condition
+
     const sid =
       (globalThis.crypto?.randomUUID && globalThis.crypto.randomUUID()) ||
       `s_${Date.now()}_${Math.floor(Math.random() * 1e9)}`;
@@ -158,15 +164,27 @@ export default function Home() {
   }
 
   return (
-    <div style={{ maxWidth: 760, margin: "40px auto", padding: 16, fontFamily: "system-ui, -apple-system, Segoe UI, Roboto, Arial" }}>
+    <div
+      style={{
+        maxWidth: 760,
+        margin: "40px auto",
+        padding: 16,
+        fontFamily:
+          "system-ui, -apple-system, Segoe UI, Roboto, Arial",
+      }}
+    >
       <h1 style={{ marginBottom: 6 }}>Chatbot Study</h1>
-      <div style={{ color: "#444", marginBottom: 18 }}>Bu sohbet bir terapi değildir.</div>
+      <div style={{ color: "#444", marginBottom: 18 }}>
+        Bu sohbet bir terapi değildir.
+      </div>
 
       {phase === "pre" && (
         <section>
           <h2 style={{ marginTop: 0 }}>Başlangıç</h2>
 
-          <div style={{ margin: "12px 0 6px" }}>Şu anki sıkıntı düzeyi (0-100)</div>
+          <div style={{ margin: "12px 0 6px" }}>
+            Şu anki sıkıntı düzeyi (0-100)
+          </div>
           <input
             type="range"
             min="0"
@@ -191,27 +209,37 @@ export default function Home() {
             <input
               placeholder="area"
               value={template.area}
-              onChange={(e) => setTemplate((t) => ({ ...t, area: e.target.value }))}
+              onChange={(e) =>
+                setTemplate((t) => ({ ...t, area: e.target.value }))
+              }
             />
             <input
               placeholder="emotion"
               value={template.emotion}
-              onChange={(e) => setTemplate((t) => ({ ...t, emotion: e.target.value }))}
+              onChange={(e) =>
+                setTemplate((t) => ({ ...t, emotion: e.target.value }))
+              }
             />
             <input
               placeholder="thought"
               value={template.thought}
-              onChange={(e) => setTemplate((t) => ({ ...t, thought: e.target.value }))}
+              onChange={(e) =>
+                setTemplate((t) => ({ ...t, thought: e.target.value }))
+              }
             />
             <input
               placeholder="hardMoment"
               value={template.hardMoment}
-              onChange={(e) => setTemplate((t) => ({ ...t, hardMoment: e.target.value }))}
+              onChange={(e) =>
+                setTemplate((t) => ({ ...t, hardMoment: e.target.value }))
+              }
             />
             <input
               placeholder="tried"
               value={template.tried}
-              onChange={(e) => setTemplate((t) => ({ ...t, tried: e.target.value }))}
+              onChange={(e) =>
+                setTemplate((t) => ({ ...t, tried: e.target.value }))
+              }
             />
           </div>
 
@@ -223,9 +251,19 @@ export default function Home() {
 
       {phase === "chat" && (
         <section>
-          <h2 style={{ marginTop: 0 }}>Sohbet ({Math.min(turnsUsed, TURN_LIMIT)}/{TURN_LIMIT})</h2>
+          <h2 style={{ marginTop: 0 }}>
+            Sohbet ({Math.min(turnsUsed, TURN_LIMIT)}/{TURN_LIMIT})
+          </h2>
 
-          <div style={{ border: "1px solid #ddd", borderRadius: 8, padding: 12, minHeight: 180, marginBottom: 10 }}>
+          <div
+            style={{
+              border: "1px solid #ddd",
+              borderRadius: 8,
+              padding: 12,
+              minHeight: 180,
+              marginBottom: 10,
+            }}
+          >
             {messages.length === 0 && !isLoading && (
               <div style={{ color: "#666" }}>Sohbet başlatılıyor.</div>
             )}
@@ -247,7 +285,10 @@ export default function Home() {
             placeholder="Mesaj yaz"
             style={{ width: "100%", marginBottom: 8 }}
             onKeyDown={(e) => {
-              if (e.key === "Enter") handleSend();
+              if (e.key === "Enter") {
+                e.preventDefault(); // ✅ Enter iki kez tetiklemesin
+                handleSend();
+              }
             }}
             disabled={turnsUsed >= TURN_LIMIT || isLoading}
           />
@@ -268,7 +309,9 @@ export default function Home() {
         <section>
           <h2 style={{ marginTop: 0 }}>Son</h2>
 
-          <div style={{ margin: "12px 0 6px" }}>Şu anki sıkıntı düzeyi (0-100)</div>
+          <div style={{ margin: "12px 0 6px" }}>
+            Şu anki sıkıntı düzeyi (0-100)
+          </div>
           <input
             type="range"
             min="0"
