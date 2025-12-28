@@ -1,81 +1,55 @@
-import OpenAI from "openai";
-
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-});
-
 export default async function handler(req, res) {
   if (req.method !== "POST") {
     return res.status(405).json({ error: "Method not allowed" });
   }
 
+  const { messages = [], condition = "informational", type = "turn" } = req.body;
+
+  if (!process.env.OPENAI_API_KEY) {
+    return res.status(500).json({ error: "Missing OPENAI_API_KEY" });
+  }
+
+  // sistem promptu (koşula göre)
+  const systemPrompt =
+    condition === "empathic"
+      ? "You are an empathic, supportive listener. Respond briefly, warmly, and non-judgmentally."
+      : "You are an informational, neutral assistant. Respond clearly and concisely.";
+
+  const apiMessages = [
+    { role: "system", content: systemPrompt },
+    ...messages,
+  ];
+
   try {
-    const { type, condition, messages, template } = req.body;
-
-    if (!process.env.OPENAI_API_KEY) {
-      return res.status(500).json({
-        error: "OPENAI_API_KEY missing",
-      });
-    }
-
-    let systemPrompt = `
-You are a chatbot used in a psychology research study.
-This is NOT therapy.
-Do not give diagnoses or instructions.
-Be supportive but neutral.
-Limit responses to 3-5 sentences.
-Language: Turkish.
-`;
-
-    if (condition === "empathic") {
-      systemPrompt += `
-Tone: empathic, validating emotions, reflective.
-`;
-    } else {
-      systemPrompt += `
-Tone: informational, neutral, structured.
-`;
-    }
-
-    if (template) {
-      systemPrompt += `
-Context provided by user:
-- Area: ${template.area}
-- Emotion: ${template.emotion}
-- Thought: ${template.thought}
-- Hard moment: ${template.hardMoment}
-- Tried before: ${template.tried}
-`;
-    }
-
-    let chatMessages = [
-      { role: "system", content: systemPrompt },
-    ];
-
-    if (type === "init") {
-      chatMessages.push({
-        role: "assistant",
-        content:
-          "Merhaba. İstersen yaşadığın durumu birkaç cümleyle paylaşabilirsin.",
-      });
-    } else {
-      chatMessages = chatMessages.concat(messages);
-    }
-
-    const completion = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
-      messages: chatMessages,
-      temperature: 0.7,
-      max_tokens: 200,
+    const response = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${process.env.OPENAI_API_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: "gpt-4o-mini",
+        messages: apiMessages,
+        temperature: 0.7,
+      }),
     });
 
-    const reply = completion.choices[0].message.content;
+    const data = await response.json();
+
+    if (!response.ok) {
+      console.error("OpenAI error:", data);
+      return res.status(500).json({ error: "OpenAI API error" });
+    }
+
+    const reply = data.choices?.[0]?.message?.content;
+
+    if (!reply) {
+      return res.status(500).json({ error: "No reply from OpenAI" });
+    }
 
     return res.status(200).json({ reply });
   } catch (err) {
-    console.error("API ERROR:", err);
-    return res.status(500).json({
-      error: "OpenAI request failed",
-    });
+    console.error("Server error:", err);
+    return res.status(500).json({ error: "Server error" });
   }
 }
