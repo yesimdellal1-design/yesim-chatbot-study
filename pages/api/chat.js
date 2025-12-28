@@ -1,6 +1,6 @@
 import OpenAI from "openai";
 
-const client = new OpenAI({
+const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
@@ -10,37 +10,72 @@ export default async function handler(req, res) {
   }
 
   try {
+    const { type, condition, messages, template } = req.body;
+
     if (!process.env.OPENAI_API_KEY) {
-      return res.status(500).json({ error: "Missing OPENAI_API_KEY" });
+      return res.status(500).json({
+        error: "OPENAI_API_KEY missing",
+      });
     }
 
-    const { messages = [], condition = "informational" } = req.body || {};
+    let systemPrompt = `
+You are a chatbot used in a psychology research study.
+This is NOT therapy.
+Do not give diagnoses or instructions.
+Be supportive but neutral.
+Limit responses to 3-5 sentences.
+Language: Turkish.
+`;
 
-    const systemPrompt =
-      condition === "empathic"
-        ? "You are a warm, empathic, supportive conversational partner. Keep responses concise."
-        : "You are a neutral, informational assistant. Keep responses concise.";
+    if (condition === "empathic") {
+      systemPrompt += `
+Tone: empathic, validating emotions, reflective.
+`;
+    } else {
+      systemPrompt += `
+Tone: informational, neutral, structured.
+`;
+    }
 
-    const completion = await client.chat.completions.create({
+    if (template) {
+      systemPrompt += `
+Context provided by user:
+- Area: ${template.area}
+- Emotion: ${template.emotion}
+- Thought: ${template.thought}
+- Hard moment: ${template.hardMoment}
+- Tried before: ${template.tried}
+`;
+    }
+
+    let chatMessages = [
+      { role: "system", content: systemPrompt },
+    ];
+
+    if (type === "init") {
+      chatMessages.push({
+        role: "assistant",
+        content:
+          "Merhaba. İstersen yaşadığın durumu birkaç cümleyle paylaşabilirsin.",
+      });
+    } else {
+      chatMessages = chatMessages.concat(messages);
+    }
+
+    const completion = await openai.chat.completions.create({
       model: "gpt-4o-mini",
-      messages: [
-        { role: "system", content: systemPrompt },
-        ...messages,
-      ],
+      messages: chatMessages,
       temperature: 0.7,
+      max_tokens: 200,
     });
 
-    const reply = completion?.choices?.[0]?.message?.content;
-
-    if (!reply) {
-      return res.status(500).json({ error: "No reply returned from model" });
-    }
+    const reply = completion.choices[0].message.content;
 
     return res.status(200).json({ reply });
   } catch (err) {
-    console.error("CHAT API ERROR:", err);
+    console.error("API ERROR:", err);
     return res.status(500).json({
-      error: err?.message || "Unknown server error",
+      error: "OpenAI request failed",
     });
   }
 }
