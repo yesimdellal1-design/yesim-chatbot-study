@@ -3,10 +3,10 @@ export default async function handler(req, res) {
     return res.status(405).json({ error: "Method not allowed" });
   }
 
-  const { message } = req.body;
+  const { messages } = req.body;
 
-  if (!message || message.trim() === "") {
-    return res.status(400).json({ error: "Message is required" });
+  if (!messages || !Array.isArray(messages) || messages.length === 0) {
+    return res.status(400).json({ error: "Messages are required" });
   }
 
   try {
@@ -24,10 +24,7 @@ export default async function handler(req, res) {
             content:
               "You are a supportive, non-therapeutic chatbot. This is not therapy.",
           },
-          {
-            role: "user",
-            content: message,
-          },
+          ...messages,
         ],
         temperature: 0.7,
       }),
@@ -40,11 +37,10 @@ export default async function handler(req, res) {
       return res.status(500).json({ error: "OpenAI API error" });
     }
 
-    const reply = data.choices?.[0]?.message?.content;
-
+    const reply = data.choices[0].message.content;
     return res.status(200).json({ reply });
-  } catch (error) {
-    console.error("Server error:", error);
+  } catch (err) {
+    console.error("Server error:", err);
     return res.status(500).json({ error: "Server error" });
   }
 }
