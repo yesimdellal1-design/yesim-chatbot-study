@@ -1,350 +1,336 @@
-// pages/index.js
-import { useEffect, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 
-const FORM_PROMPT = `Lütfen aşağıdaki cümleleri ayrı satırlar halinde tamamla:
+const TURN_LIMIT = 5;
 
-1) Bu durum beni en çok ______ hissettirdi.
-2) O sırada aklımdan geçen en baskın düşünce ______ idi.
-3) Beni en çok zorlayan şey ______.
-4) Şu anda bu konudan beklentim / ihtiyacım ______.
-5) Daha önce denediğim şey ______ ve sonucu ______ oldu.`;
+function randCondition() {
+  return Math.random() < 0.5 ? "informational" : "empathic";
+}
 
 export default function Home() {
-  // pretest → select → form → chat → manipulation → posttest → done
-  const [phase, setPhase] = useState("pretest");
+  const [sessionId, setSessionId] = useState("");
+  const [condition, setCondition] = useState("");
+  const [phase, setPhase] = useState("pre"); // pre -> template -> chat -> post
 
-  const [templates, setTemplates] = useState([]);
-  const [selected, setSelected] = useState(null);
+  const [preDistress, setPreDistress] = useState(50);
+  const [postDistress, setPostDistress] = useState(50);
 
-  const [token, setToken] = useState(null);
+  const [template, setTemplate] = useState({
+    area: "",
+    emotion: "",
+    thought: "",
+    hardMoment: "",
+    tried: "",
+  });
+
   const [messages, setMessages] = useState([]);
+  const [userInput, setUserInput] = useState("");
+  const [isLoading, setIsLoading] = useState(false);
+  const [errorText, setErrorText] = useState("");
 
-  const [formText, setFormText] = useState("");
-  const [chatText, setChatText] = useState("");
-
-  const [error, setError] = useState("");
-  const [loading, setLoading] = useState(false);
-
-  // Pre / Post stress (0–100 VAS)
-  const [preStress, setPreStress] = useState(50);
-  const [postStress, setPostStress] = useState(50);
-
-  // Manipulation check (1–7)
-  const [perceivedEmpathy, setPerceivedEmpathy] = useState(4);
-  const [perceivedInfo, setPerceivedInfo] = useState(4);
-
-  // 10 min limit (chat phase)
-  const startTimeRef = useRef(null);
-  const timerRef = useRef(null);
-  const [timeLeft, setTimeLeft] = useState(600);
+  const chatStartedRef = useRef(false);
 
   useEffect(() => {
-    (async () => {
-      try {
-        const r = await fetch("/api/chat", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ type: "templates" }),
-        });
-        const d = await r.json().catch(() => ({}));
-        if (!r.ok) throw new Error(d?.error || "Template’ler yüklenemedi.");
-        setTemplates(d.templates || []);
-      } catch (e) {
-        setError(e?.message || "Template’ler yüklenemedi.");
-      }
-    })();
+    const sid =
+      (globalThis.crypto?.randomUUID && globalThis.crypto.randomUUID()) ||
+      `s_${Date.now()}_${Math.floor(Math.random() * 1e9)}`;
+    setSessionId(sid);
+    setCondition(randCondition());
   }, []);
 
-  // start timer when entering chat
+  const turnsUsed = useMemo(() => {
+    return messages.filter((m) => m.role === "user").length;
+  }, [messages]);
+
+  async function callChatAPI(payload) {
+    const res = await fetch("/api/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      const msg = data?.error || data?.message || "API hatası";
+      throw new Error(msg);
+    }
+    if (!data?.reply) throw new Error("API reply dönmedi");
+    return data.reply;
+  }
+
   useEffect(() => {
     if (phase !== "chat") return;
+    if (chatStartedRef.current) return;
 
-    startTimeRef.current = Date.now();
-    setTimeLeft(600);
+    chatStartedRef.current = true;
+    setIsLoading(true);
+    setErrorText("");
 
-    timerRef.current = setInterval(() => {
-      const elapsed = Math.floor((Date.now() - startTimeRef.current) / 1000);
-      const remaining = 600 - elapsed;
-      setTimeLeft(remaining);
+    (async () => {
+      try {
+        const reply = await callChatAPI({
+          type: "init",
+          sessionId,
+          condition,
+          template,
+          messages: [],
+        });
 
-      if (remaining <= 0) {
-        clearInterval(timerRef.current);
-        setPhase("manipulation");
+        setMessages([{ role: "assistant", content: reply }]);
+      } catch (err) {
+        setErrorText(err?.message || "Başlatma hatası");
+      } finally {
+        setIsLoading(false);
       }
-    }, 1000);
+    })();
+  }, [phase, sessionId, condition, template]);
 
-    return () => clearInterval(timerRef.current);
-  }, [phase]);
+  function goToTemplate() {
+    setPhase("template");
+  }
 
-  function resetAll() {
-    setPhase("pretest");
-    setSelected(null);
-    setToken(null);
+  function startChat() {
+    setPhase("chat");
+  }
+
+  async function handleSend() {
+    const text = userInput.trim();
+
+    if (!text) {
+      setErrorText("Message is required");
+      return;
+    }
+
+    if (isLoading) return;
+    if (turnsUsed >= TURN_LIMIT) return;
+
+    setErrorText("");
+
+    const userMsg = { role: "user", content: text };
+    const nextMessages = [...messages, userMsg];
+
+    setMessages(nextMessages);
+    setUserInput("");
+    setIsLoading(true);
+
+    try {
+      const reply = await callChatAPI({
+        type: "turn",
+        sessionId,
+        condition,
+        template,
+        messages: nextMessages,
+      });
+
+      const assistantMsg = { role: "assistant", content: reply };
+      const after = [...nextMessages, assistantMsg];
+      setMessages(after);
+
+      const nextTurns = after.filter((m) => m.role === "user").length;
+      if (nextTurns >= TURN_LIMIT) {
+        setPhase("post");
+      }
+    } catch (err) {
+      setErrorText(err?.message || "Mesaj gönderme hatası");
+    } finally {
+      setIsLoading(false);
+    }
+  }
+
+  function resetStudy() {
+    chatStartedRef.current = false;
+    setPhase("pre");
+    setPreDistress(50);
+    setPostDistress(50);
+    setTemplate({ area: "", emotion: "", thought: "", hardMoment: "", tried: "" });
     setMessages([]);
-    setFormText("");
-    setChatText("");
-    setError("");
-    setLoading(false);
-    setPreStress(50);
-    setPostStress(50);
-    setPerceivedEmpathy(4);
-    setPerceivedInfo(4);
-    clearInterval(timerRef.current);
-    setTimeLeft(600);
-  }
+    setUserInput("");
+    setErrorText("");
 
-  async function startChat() {
-    setError("");
-    if (!selected) return;
-
-    setLoading(true);
-    try {
-      const r = await fetch("/api/chat", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          type: "start",
-          templateId: selected.id,
-          sessionId: Date.now().toString(),
-        }),
-      });
-
-      const d = await r.json().catch(() => ({}));
-      if (!r.ok) throw new Error(d?.error || "Start hatası");
-
-      setToken(d.token);
-      setMessages([{ role: "assistant", content: d.reply }]);
-      setPhase("form");
-      setFormText("");
-    } catch (e) {
-      setError(e?.message || "Start hatası");
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  function isFormValid(text) {
-    const lines = text
-      .split("\n")
-      .map((l) => l.trim())
-      .filter(Boolean);
-
-    // En az 5 satır ve 1)–5) içermesi (esnek)
-    const has1 = lines.some((l) => l.startsWith("1"));
-    const has2 = lines.some((l) => l.startsWith("2"));
-    const has3 = lines.some((l) => l.startsWith("3"));
-    const has4 = lines.some((l) => l.startsWith("4"));
-    const has5 = lines.some((l) => l.startsWith("5"));
-    return lines.length >= 5 && has1 && has2 && has3 && has4 && has5;
-  }
-
-  async function submitFormToBot() {
-    setError("");
-    if (!token) return setError("Token yok. Baştan başla.");
-    if (!isFormValid(formText)) {
-      return setError("Lütfen 1)–5) maddelerini ayrı satırlarda doldur.");
-    }
-
-    const next = [...messages, { role: "user", content: formText.trim() }];
-    setMessages(next);
-    setLoading(true);
-
-    try {
-      const r = await fetch("/api/chat", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ type: "turn", token, messages: next }),
-      });
-
-      const d = await r.json().catch(() => ({}));
-      if (!r.ok) throw new Error(d?.error || "Turn hatası");
-      if (!d.reply) throw new Error("Bot yanıtı boş geldi.");
-
-      setMessages([...next, { role: "assistant", content: d.reply }]);
-      setFormText("");
-      setPhase("chat"); // timer burada başlar
-    } catch (e) {
-      setError(e?.message || "Turn hatası");
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  async function sendChatMessage() {
-    setError("");
-    if (!token) return setError("Token yok.");
-    if (timeLeft <= 0) return;
-    const text = chatText.trim();
-    if (!text) return;
-
-    const next = [...messages, { role: "user", content: text }];
-    setMessages(next);
-    setChatText("");
-    setLoading(true);
-
-    try {
-      const r = await fetch("/api/chat", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ type: "turn", token, messages: next }),
-      });
-
-      const d = await r.json().catch(() => ({}));
-      if (!r.ok) throw new Error(d?.error || "Turn hatası");
-      if (!d.reply) throw new Error("Bot yanıtı boş geldi.");
-
-      setMessages([...next, { role: "assistant", content: d.reply }]);
-    } catch (e) {
-      setError(e?.message || "Turn hatası");
-    } finally {
-      setLoading(false);
-    }
+    const sid =
+      (globalThis.crypto?.randomUUID && globalThis.crypto.randomUUID()) ||
+      `s_${Date.now()}_${Math.floor(Math.random() * 1e9)}`;
+    setSessionId(sid);
+    setCondition(randCondition());
   }
 
   return (
-    <div style={{ maxWidth: 900, margin: "40px auto", padding: 20, fontFamily: "system-ui, -apple-system" }}>
-      <h1>Chatbot Deneyi</h1>
+    <div
+      style={{
+        maxWidth: 760,
+        margin: "40px auto",
+        padding: 16,
+        fontFamily: "system-ui, -apple-system, Segoe UI, Roboto, Arial",
+      }}
+    >
+      <h1 style={{ marginBottom: 6 }}>Chatbot Study</h1>
+      <div style={{ color: "#444", marginBottom: 18 }}>
+        Bu sohbet bir terapi değildir.
+      </div>
 
-      <button onClick={resetAll} style={{ marginBottom: 12 }}>
-        Baştan Başla
-      </button>
+      {phase === "pre" && (
+        <section>
+          <h2 style={{ marginTop: 0 }}>Başlangıç</h2>
 
-      {error && (
-        <div style={{ background: "#ffe5e5", border: "1px solid #ffb3b3", padding: 10, borderRadius: 8, marginBottom: 12 }}>
-          <b>Hata:</b> {error}
-        </div>
-      )}
-
-      {/* PRETEST */}
-      {phase === "pretest" && (
-        <div style={{ border: "1px solid #ddd", padding: 14, borderRadius: 10 }}>
-          <h3>Pre-test</h3>
-          <p>Şu anda ne kadar stresli / kaygılı hissediyorsun?</p>
-          <input type="range" min="0" max="100" value={preStress} onChange={(e) => setPreStress(Number(e.target.value))} />
-          <p><b>{preStress}</b></p>
-          <button onClick={() => setPhase("select")}>Devam</button>
-        </div>
-      )}
-
-      {/* SELECT */}
-      {phase === "select" && (
-        <div style={{ border: "1px solid #ddd", padding: 14, borderRadius: 10 }}>
-          <h3>1) Bir durum seç</h3>
-          {templates.map((t) => (
-            <label key={t.id} style={{ display: "block", marginBottom: 10 }}>
-              <input type="radio" checked={selected?.id === t.id} onChange={() => setSelected(t)} />{" "}
-              <b>{t.title}</b>
-              <div style={{ marginLeft: 22, opacity: 0.85 }}>{t.text}</div>
-            </label>
-          ))}
-          <button disabled={!selected || loading} onClick={startChat}>
-            {loading ? "Başlatılıyor..." : "Sohbeti Başlat"}
-          </button>
-        </div>
-      )}
-
-      {/* FORM */}
-      {phase === "form" && (
-        <div style={{ border: "1px solid #ddd", padding: 14, borderRadius: 10 }}>
-          <h3>2) Cümleleri tamamla</h3>
-          <div style={{ whiteSpace: "pre-wrap", background: "#f7f7f7", padding: 10, borderRadius: 8, marginBottom: 10 }}>
-            {FORM_PROMPT}
+          <div style={{ margin: "12px 0 6px" }}>
+            Şu anki sıkıntı düzeyi (0-100)
           </div>
-
-          <textarea
-            rows={8}
-            value={formText}
-            onChange={(e) => setFormText(e.target.value)}
-            placeholder={"Örn:\n1) ...\n2) ...\n3) ...\n4) ...\n5) ..."}
-            style={{ width: "100%", padding: 10, borderRadius: 8, border: "1px solid #ccc" }}
-            disabled={loading}
+          <input
+            type="range"
+            min="0"
+            max="100"
+            value={preDistress}
+            onChange={(e) => setPreDistress(Number(e.target.value))}
+            style={{ width: "100%" }}
           />
+          <div style={{ marginTop: 6 }}>{preDistress}</div>
 
-          <button onClick={submitFormToBot} disabled={loading} style={{ marginTop: 10 }}>
-            {loading ? "Gönderiliyor..." : "Gönder"}
+          <button onClick={goToTemplate} style={{ marginTop: 14 }}>
+            Devam
           </button>
-
-          <div style={{ marginTop: 16, borderTop: "1px solid #eee", paddingTop: 12 }}>
-            <h3 style={{ marginTop: 0 }}>Sohbet</h3>
-            <div style={{ whiteSpace: "pre-wrap" }}>
-              {messages.map((m, i) => (
-                <p key={i} style={{ margin: "10px 0" }}>
-                  <b>{m.role === "user" ? "Sen" : "Bot"}:</b> {m.content}
-                </p>
-              ))}
-            </div>
-          </div>
-        </div>
+        </section>
       )}
 
-      {/* CHAT */}
+      {phase === "template" && (
+        <section>
+          <h2 style={{ marginTop: 0 }}>Şablon</h2>
+
+          <div style={{ display: "grid", gap: 8 }}>
+            <input
+              placeholder="area"
+              value={template.area}
+              onChange={(e) =>
+                setTemplate((t) => ({ ...t, area: e.target.value }))
+              }
+            />
+            <input
+              placeholder="emotion"
+              value={template.emotion}
+              onChange={(e) =>
+                setTemplate((t) => ({ ...t, emotion: e.target.value }))
+              }
+            />
+            <input
+              placeholder="thought"
+              value={template.thought}
+              onChange={(e) =>
+                setTemplate((t) => ({ ...t, thought: e.target.value }))
+              }
+            />
+            <input
+              placeholder="hardMoment"
+              value={template.hardMoment}
+              onChange={(e) =>
+                setTemplate((t) => ({ ...t, hardMoment: e.target.value }))
+              }
+            />
+            <input
+              placeholder="tried"
+              value={template.tried}
+              onChange={(e) =>
+                setTemplate((t) => ({ ...t, tried: e.target.value }))
+              }
+            />
+          </div>
+
+          <button onClick={startChat} style={{ marginTop: 12 }}>
+            Sohbeti Başlat
+          </button>
+        </section>
+      )}
+
       {phase === "chat" && (
-        <div style={{ border: "1px solid #ddd", padding: 14, borderRadius: 10 }}>
-          <h3>3) Sohbet (10 dakika)</h3>
-          <p><b>Kalan süre:</b> {timeLeft} sn</p>
+        <section>
+          <h2 style={{ marginTop: 0 }}>
+            Sohbet ({Math.min(turnsUsed, TURN_LIMIT)}/{TURN_LIMIT})
+          </h2>
 
-          <div style={{ border: "1px solid #ccc", padding: 12, borderRadius: 8, minHeight: 180, whiteSpace: "pre-wrap" }}>
-            {messages.map((m, i) => (
-              <p key={i} style={{ margin: "10px 0" }}>
-                <b>{m.role === "user" ? "Sen" : "Bot"}:</b> {m.content}
-              </p>
+          <div
+            style={{
+              border: "1px solid #ddd",
+              borderRadius: 8,
+              padding: 12,
+              minHeight: 180,
+              marginBottom: 10,
+            }}
+          >
+            {messages.length === 0 && !isLoading && (
+              <div style={{ color: "#666" }}>Sohbet başlatılıyor.</div>
+            )}
+
+            {messages.map((m, idx) => (
+              <div key={idx} style={{ marginBottom: 10 }}>
+                <strong>{m.role === "user" ? "Sen" : "Bot"}: </strong>
+                <span>{m.content}</span>
+              </div>
             ))}
+
+            {isLoading && <div style={{ color: "#666" }}>Yükleniyor.</div>}
+            {errorText && <div style={{ color: "crimson" }}>{errorText}</div>}
           </div>
 
-          <textarea
-            rows={3}
-            value={chatText}
-            onChange={(e) => setChatText(e.target.value)}
-            style={{ width: "100%", marginTop: 10, padding: 10, borderRadius: 8, border: "1px solid #ccc" }}
-            disabled={loading || timeLeft <= 0}
+          <input
+            value={userInput}
+            onChange={(e) => setUserInput(e.target.value)}
             placeholder="Mesaj yaz"
+            style={{ width: "100%", marginBottom: 8 }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                handleSend();
+              }
+            }}
+            disabled={turnsUsed >= TURN_LIMIT || isLoading}
           />
 
-          <button onClick={sendChatMessage} disabled={loading || timeLeft <= 0} style={{ marginTop: 10 }}>
-            {loading ? "Gönderiliyor..." : "Gönder"}
+          <button onClick={handleSend} disabled={turnsUsed >= TURN_LIMIT || isLoading}>
+            Gönder
           </button>
 
-          <button onClick={() => setPhase("manipulation")} style={{ marginLeft: 10 }}>
-            Süreyi beklemeden bitir
+          {turnsUsed >= TURN_LIMIT && (
+            <div style={{ marginTop: 10, color: "#444" }}>
+              5 tur tamamlandı, son ölçüme geçiliyor.
+            </div>
+          )}
+        </section>
+      )}
+
+      {phase === "post" && (
+        <section>
+          <h2 style={{ marginTop: 0 }}>Son</h2>
+
+          <div style={{ margin: "12px 0 6px" }}>
+            Şu anki sıkıntı düzeyi (0-100)
+          </div>
+          <input
+            type="range"
+            min="0"
+            max="100"
+            value={postDistress}
+            onChange={(e) => setPostDistress(Number(e.target.value))}
+            style={{ width: "100%" }}
+          />
+          <div style={{ marginTop: 6 }}>{postDistress}</div>
+
+          <div style={{ marginTop: 12, color: "#444" }}>
+            Teşekkürler. Oturum kaydı: {sessionId}
+          </div>
+
+          <button onClick={resetStudy} style={{ marginTop: 12 }}>
+            Yeniden başlat
           </button>
-        </div>
+        </section>
       )}
 
-      {/* MANIPULATION */}
-      {phase === "manipulation" && (
-        <div style={{ border: "1px solid #ddd", padding: 14, borderRadius: 10 }}>
-          <h3>Manipülasyon Kontrolü</h3>
+      <hr style={{ margin: "24px 0" }} />
 
-          <p>Bot yanıtları ne kadar empatikti? (1–7)</p>
-          <input type="range" min="1" max="7" value={perceivedEmpathy} onChange={(e) => setPerceivedEmpathy(Number(e.target.value))} />
-          <p><b>{perceivedEmpathy}</b></p>
-
-          <p>Bot yanıtları ne kadar bilgilendirici / çözüm odaklıydı? (1–7)</p>
-          <input type="range" min="1" max="7" value={perceivedInfo} onChange={(e) => setPerceivedInfo(Number(e.target.value))} />
-          <p><b>{perceivedInfo}</b></p>
-
-          <button onClick={() => setPhase("posttest")}>Devam</button>
+      <details>
+        <summary>Teknik bilgi</summary>
+        <div style={{ marginTop: 10, color: "#444" }}>
+          Condition: <code>{condition || "-"}</code>
+          <br />
+          Session: <code>{sessionId || "-"}</code>
         </div>
-      )}
-
-      {/* POSTTEST */}
-      {phase === "posttest" && (
-        <div style={{ border: "1px solid #ddd", padding: 14, borderRadius: 10 }}>
-          <h3>Post-test</h3>
-          <p>Şu anda ne kadar stresli / kaygılı hissediyorsun?</p>
-          <input type="range" min="0" max="100" value={postStress} onChange={(e) => setPostStress(Number(e.target.value))} />
-          <p><b>{postStress}</b></p>
-          <button onClick={() => setPhase("done")}>Bitir</button>
-        </div>
-      )}
-
-      {/* DONE */}
-      {phase === "done" && (
-        <div style={{ border: "1px solid #ddd", padding: 14, borderRadius: 10 }}>
-          <h3>Teşekkürler</h3>
-          <p>Katılımın için teşekkür ederiz.</p>
-        </div>
-      )}
+      </details>
     </div>
   );
 }
